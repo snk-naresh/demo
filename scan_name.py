@@ -78,6 +78,17 @@ def folder_name_for_search(search_name, search_date=None):
     return f"{safe}_{date_str}"
 
 
+def search_folder_from_url(base_url):
+    """Return the remote folder being searched (URL path without the PDF filename)."""
+    # e.g. .../S29/210/S29_210_{n}.pdf  ->  .../S29/210/
+    path = base_url.split("?")[0]
+    if "{n}" in path:
+        path = path[: path.rfind("/") + 1] if "/" in path else path
+    elif path.lower().endswith(".pdf"):
+        path = path[: path.rfind("/") + 1]
+    return path
+
+
 BASE_URL = "https://www.eci.gov.in/sir/f4/S29/data/OLDSIRROLL/S29/210/S29_210_{n}.pdf"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -176,7 +187,8 @@ def crop_row(page, rect, pad_y=8, zoom=3, full_width=True):
 
 
 def generate_html_report(out_dir, log_rows, not_found, search_name, scanned_count,
-                         search_date=None):
+                         search_date=None, search_folder=None, file_range=None,
+                         pdf_dir=None):
     """Write a self-contained HTML report: hit table (with inline screenshots) plus
     a collapsible <details> dropdown listing every PDF that was not found / failed.
     Open report.html in Chrome, Edge, or Firefox."""
@@ -184,6 +196,9 @@ def generate_html_report(out_dir, log_rows, not_found, search_name, scanned_coun
     if search_date is None:
         search_date = datetime.now()
     date_display = search_date.strftime("%Y-%m-%d %H:%M")
+    search_folder = search_folder or ""
+    file_range = file_range or ""
+    pdf_dir_display = str(pdf_dir) if pdf_dir else ""
 
     def esc(s):
         return (str(s).replace("&", "&amp;").replace("<", "&lt;")
@@ -223,12 +238,32 @@ def generate_html_report(out_dir, log_rows, not_found, search_name, scanned_coun
   summary {{ cursor: pointer; font-weight: 600; }}
   ul {{ columns: 2; max-height: 400px; overflow-y: auto; }}
   .summary-line {{ color: #555; margin-bottom: 4px; }}
+  .folder-highlight {{
+    background: #fff3bf;
+    border: 2px solid #f59f00;
+    border-radius: 6px;
+    padding: 10px 14px;
+    margin: 12px 0;
+    font-size: 14px;
+  }}
+  .folder-highlight strong {{ color: #9c5b00; }}
+  .folder-highlight code {{
+    background: #ffe8a3;
+    padding: 2px 6px;
+    border-radius: 4px;
+    word-break: break-all;
+  }}
   img {{ height: auto; }}
 </style>
 </head>
 <body>
   <h1>Search results for "{esc(search_name)}"</h1>
   <p class="summary-line">Search date: {esc(date_display)}</p>
+  <div class="folder-highlight">
+    <div><strong>Folder being searched:</strong> <code>{esc(search_folder)}</code></div>
+    <div style="margin-top:6px;"><strong>File range:</strong> {esc(file_range)}</div>
+    <div style="margin-top:6px;"><strong>Local PDF folder:</strong> <code>{esc(pdf_dir_display)}</code></div>
+  </div>
   <p class="summary-line">PDFs scanned: {scanned_count} &nbsp;|&nbsp;
      Hits: {len(log_rows)} &nbsp;|&nbsp;
      Files not found / failed: {len(not_found)}</p>
@@ -307,7 +342,11 @@ def main():
         sys.exit(1)
 
     search_date = datetime.now()
+    search_folder = search_folder_from_url(args.base_url)
+    file_range = f"{args.start} to {args.end}"
     print(f"Searching for: {search_name}")
+    print(f"*** Folder being searched: {search_folder}")
+    print(f"*** File range: {file_range}")
 
     if args.ocr and not OCR_AVAILABLE:
         print("--ocr requested but pytesseract/Pillow aren't installed. "
@@ -322,6 +361,7 @@ def main():
         out_dir = Path(folder_name_for_search(search_name, search_date))
     pdf_dir.mkdir(parents=True, exist_ok=True)
     out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Local PDF folder: {pdf_dir.resolve()}")
     print(f"Output folder: {out_dir.resolve()}")
 
     log_path = out_dir / "hits.csv"
@@ -387,7 +427,11 @@ def main():
 
     # report_path = generate_html_report(out_dir, log_rows, not_found, args.name, scanned_count)
     report_path = generate_html_report(
-        out_dir, log_rows, not_found, search_name, scanned_count, search_date=search_date
+        out_dir, log_rows, not_found, search_name, scanned_count,
+        search_date=search_date,
+        search_folder=search_folder,
+        file_range=file_range,
+        pdf_dir=pdf_dir.resolve(),
     )
 
     print(f"\nDone. Scanned {scanned_count} PDF(s), {len(log_rows)} hit(s), "
