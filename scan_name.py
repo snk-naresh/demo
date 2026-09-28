@@ -10,9 +10,11 @@ Download a numbered range of ECI electoral-roll PDFs, search each page for a
 target name, and save a screenshot (image crop) of the entire matching row.
 
 Usage examples:
+    python search_eci_rolls.py --start 1 --end 500
     python search_eci_rolls.py --start 1 --end 500 --name "krishna rao"
     python search_eci_rolls.py --start 1 --end 500 --name "krishna rao" --ocr
     python search_eci_rolls.py --start 1 --end 20 --keep-pdfs --delay 1.0
+    # If --name is omitted, a dialog box asks for the name.
 
 Dependencies:
     pip install requests pymupdf
@@ -24,19 +26,24 @@ Dependencies:
     #   Linux:   sudo apt install tesseract-ocr
 
 Output:
-    hits/                  -- cropped row screenshots (PNG)
-    hits/hits.csv           -- log of every hit: source pdf/url, page, snippet, image path
-    hits/report.html        -- browsable report: hit screenshots + a collapsible
-                                dropdown listing every URL that returned 404 / failed
+    <namesearched>_<YYYY-MM-DD>/              -- folder named after search + date
+    <namesearched>_<YYYY-MM-DD>/hits.csv      -- log of every hit
+    <namesearched>_<YYYY-MM-DD>/report.html   -- open in Chrome / Edge / Firefox
+    <namesearched>_<YYYY-MM-DD>/*.png         -- cropped row screenshots
 """
 
 import argparse
 import csv
 import io
+import os
 import re
 import sys
 import time
+import webbrowser
+from datetime import datetime
 from pathlib import Path
+import tkinter as tk
+from tkinter import simpledialog
 
 import requests
 import fitz  # PyMuPDF
@@ -47,6 +54,29 @@ try:
     OCR_AVAILABLE = True
 except ImportError:
     OCR_AVAILABLE = False
+
+
+def _fix_tcl_tk_paths():
+    """Point Tcl/Tk at the base Python install (venv often can't find init.tcl)."""
+    base = Path(sys.base_prefix)
+    tcl = base / "tcl" / "tcl8.6"
+    tk_lib = base / "tcl" / "tk8.6"
+    if tcl.is_dir() and not os.environ.get("TCL_LIBRARY"):
+        os.environ["TCL_LIBRARY"] = str(tcl)
+    if tk_lib.is_dir() and not os.environ.get("TK_LIBRARY"):
+        os.environ["TK_LIBRARY"] = str(tk_lib)
+
+
+def folder_name_for_search(search_name, search_date=None):
+    """Build a filesystem-safe folder name: namesearched_YYYY-MM-DD."""
+    if search_date is None:
+        search_date = datetime.now()
+    date_str = search_date.strftime("%Y-%m-%d")
+    # Keep letters/digits/spaces/hyphens/underscores; collapse spaces to _
+    safe = re.sub(r"[^\w\s\-]", "", search_name, flags=re.UNICODE).strip()
+    safe = re.sub(r"\s+", "_", safe) or "search"
+    return f"{safe}_{date_str}"
+
 
 BASE_URL = "https://www.eci.gov.in/sir/f4/S29/data/OLDSIRROLL/S29/210/S29_210_{n}.pdf"
 HEADERS = {
@@ -145,9 +175,15 @@ def crop_row(page, rect, pad_y=8, zoom=3, full_width=True):
     return page.get_pixmap(matrix=mat, clip=clip)
 
 
-def generate_html_report(out_dir, log_rows, not_found, search_name, scanned_count):
+def generate_html_report(out_dir, log_rows, not_found, search_name, scanned_count,
+                         search_date=None):
     """Write a self-contained HTML report: hit table (with inline screenshots) plus
-    a collapsible <details> dropdown listing every PDF that was not found / failed."""
+    a collapsible <details> dropdown listing every PDF that was not found / failed.
+    Open report.html in Chrome, Edge, or Firefox."""
+
+    if search_date is None:
+        search_date = datetime.now()
+    date_display = search_date.strftime("%Y-%m-%d %H:%M")
 
     def esc(s):
         return (str(s).replace("&", "&amp;").replace("<", "&lt;")
@@ -162,18 +198,20 @@ def generate_html_report(out_dir, log_rows, not_found, search_name, scanned_coun
           <td>{esc(row['page'])}</td>
           <td>{esc(row['match_source'])}</td>
           <td>{esc(row['row_text'])}</td>
-          <td><a href="{esc(row['pdf_url'])}" target="_blank">source pdf</a></td>
+          <td><a href="{esc(row['pdf_url'])}" target="_blank" rel="noopener">source pdf</a></td>
           <td><img src="{esc(img_rel)}" alt="row screenshot" style="max-width:600px;"></td>
         </tr>""")
 
     not_found_items = "\n".join(
-        f'          <li><a href="{esc(u)}" target="_blank">{esc(u)}</a></li>' for u in not_found
+        f'          <li><a href="{esc(u)}" target="_blank" rel="noopener">{esc(u)}</a></li>'
+        for u in not_found
     )
 
     html = f"""<!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ECI roll search: "{esc(search_name)}"</title>
 <style>
   body {{ font-family: -apple-system, Arial, sans-serif; margin: 24px; color: #222; }}
@@ -185,10 +223,12 @@ def generate_html_report(out_dir, log_rows, not_found, search_name, scanned_coun
   summary {{ cursor: pointer; font-weight: 600; }}
   ul {{ columns: 2; max-height: 400px; overflow-y: auto; }}
   .summary-line {{ color: #555; margin-bottom: 4px; }}
+  img {{ height: auto; }}
 </style>
 </head>
 <body>
   <h1>Search results for "{esc(search_name)}"</h1>
+  <p class="summary-line">Search date: {esc(date_display)}</p>
   <p class="summary-line">PDFs scanned: {scanned_count} &nbsp;|&nbsp;
      Hits: {len(log_rows)} &nbsp;|&nbsp;
      Files not found / failed: {len(not_found)}</p>
@@ -220,11 +260,16 @@ def main():
     ap = argparse.ArgumentParser(description="Search ECI electoral roll PDFs for a name.")
     ap.add_argument("--start", type=int, default=1)
     ap.add_argument("--end", type=int, default=500)
-    ap.add_argument("--name", default="krishna rao", help="Name to search for (case-insensitive).")
+    # ap.add_argument("--name", default="Krish", help="Name to search for (case-insensitive).")
+    ap.add_argument("--name", default=None,
+                     help="Name to search for (case-insensitive). "
+                          "If omitted, a dialog box asks for it.")
     ap.add_argument("--base-url", default=BASE_URL,
                      help="URL template with {n} placeholder for the file number.")
     ap.add_argument("--pdf-dir", default="pdfs")
-    ap.add_argument("--out-dir", default="hits")
+    # ap.add_argument("--out-dir", default="hits")
+    ap.add_argument("--out-dir", default=None,
+                     help="Output folder. Default: <namesearched>_<YYYY-MM-DD>.")
     ap.add_argument("--keep-pdfs", action="store_true",
                      help="Keep downloaded PDFs instead of deleting each after it's scanned.")
     ap.add_argument("--ocr", action="store_true",
@@ -233,10 +278,36 @@ def main():
                      help="Seconds to sleep between downloads (be polite to the server).")
     args = ap.parse_args()
 
-    target_tokens = normalize(args.name).split()
-    if not target_tokens:
-        print("Provide a non-empty --name to search for.")
+    # target_tokens = normalize(args.name).split()
+    # if not target_tokens:
+    #     print("Provide a non-empty --name to search for.")
+    #     sys.exit(1)
+
+    # Ask via dialog if --name was not passed on the command line
+    search_name = args.name
+    if not search_name:
+        _fix_tcl_tk_paths()
+        root = tk.Tk()
+        root.withdraw()  # hide empty main window
+        root.attributes("-topmost", True)
+        search_name = simpledialog.askstring(
+            "Search name",
+            "Enter the name to search for:",
+            parent=root,
+        )
+        root.destroy()
+
+    if not search_name or not search_name.strip():
+        print("No name provided. Exiting.")
         sys.exit(1)
+
+    target_tokens = normalize(search_name).split()
+    if not target_tokens:
+        print("Provide a non-empty name to search for.")
+        sys.exit(1)
+
+    search_date = datetime.now()
+    print(f"Searching for: {search_name}")
 
     if args.ocr and not OCR_AVAILABLE:
         print("--ocr requested but pytesseract/Pillow aren't installed. "
@@ -244,9 +315,14 @@ def main():
         sys.exit(1)
 
     pdf_dir = Path(args.pdf_dir)
-    out_dir = Path(args.out_dir)
+    # out_dir = Path(args.out_dir)
+    if args.out_dir:
+        out_dir = Path(args.out_dir)
+    else:
+        out_dir = Path(folder_name_for_search(search_name, search_date))
     pdf_dir.mkdir(parents=True, exist_ok=True)
     out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Output folder: {out_dir.resolve()}")
 
     log_path = out_dir / "hits.csv"
     log_rows = []
@@ -309,13 +385,23 @@ def main():
             writer.writeheader()
             writer.writerows(log_rows)
 
-    report_path = generate_html_report(out_dir, log_rows, not_found, args.name, scanned_count)
+    # report_path = generate_html_report(out_dir, log_rows, not_found, args.name, scanned_count)
+    report_path = generate_html_report(
+        out_dir, log_rows, not_found, search_name, scanned_count, search_date=search_date
+    )
 
     print(f"\nDone. Scanned {scanned_count} PDF(s), {len(log_rows)} hit(s), "
           f"{len(not_found)} not found/failed.")
     if log_rows:
         print(f"Hit log: {log_path}")
-    print(f"Report (open in a browser): {report_path}")
+    print(f"Report (open in a browser): {report_path.resolve()}")
+
+    # Open report.html in the default browser (Chrome / Edge / Firefox, etc.)
+    try:
+        webbrowser.open(report_path.resolve().as_uri())
+    except Exception as e:
+        print(f"Could not auto-open browser: {e}")
+        print(f"Open this file manually: {report_path.resolve()}")
 
 
 if __name__ == "__main__":
